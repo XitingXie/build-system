@@ -7,10 +7,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/xitingxie/build-system/internal/cache"
 	"github.com/xitingxie/build-system/internal/graph"
 	"github.com/xitingxie/build-system/internal/hasher"
+	"github.com/xitingxie/build-system/internal/metrics"
 	"github.com/xitingxie/build-system/internal/parser"
 )
 
@@ -18,11 +21,23 @@ import (
 type Executor struct {
 	cache   *cache.Cache
 	workDir string // root of the source tree
+
+	mu      sync.Mutex
+	actions []metrics.ActionRow
 }
 
 // New creates an Executor.
 func New(c *cache.Cache, workDir string) *Executor {
 	return &Executor{cache: c, workDir: workDir}
+}
+
+// RecordedActions returns all action rows collected during this build.
+func (e *Executor) RecordedActions() []metrics.ActionRow {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]metrics.ActionRow, len(e.actions))
+	copy(out, e.actions)
+	return out
 }
 
 // Run executes the action for node n.
@@ -46,9 +61,17 @@ func (e *Executor) Run(n *graph.Node, depDigests [][32]byte) error {
 	// Compute action key.
 	actionKey := hasher.ActionKey(inputs, t.Cmd, nil, depDigests)
 
+	start := time.Now()
+
 	// Cache hit?
 	if result, ok := e.cache.LookupAction(actionKey); ok {
 		fmt.Printf("  [cached] %s\n", t.Label)
+		e.record(metrics.ActionRow{
+			Label:      t.Label,
+			CacheHit:   true,
+			DurationMs: time.Since(start).Milliseconds(),
+			ExitCode:   0,
+		})
 		return e.restoreOutputs(t.Label, result)
 	}
 
@@ -56,6 +79,12 @@ func (e *Executor) Run(n *graph.Node, depDigests [][32]byte) error {
 	fmt.Printf("  [build]  %s\n", t.Label)
 	outDir, err := e.runAction(t, srcPaths)
 	if err != nil {
+		e.record(metrics.ActionRow{
+			Label:      t.Label,
+			CacheHit:   false,
+			DurationMs: time.Since(start).Milliseconds(),
+			ExitCode:   1,
+		})
 		return err
 	}
 
@@ -75,6 +104,13 @@ func (e *Executor) Run(n *graph.Node, depDigests [][32]byte) error {
 	if err := e.cache.StoreAction(actionKey, result); err != nil {
 		return fmt.Errorf("store action result for %s: %w", t.Label, err)
 	}
+
+	e.record(metrics.ActionRow{
+		Label:      t.Label,
+		CacheHit:   false,
+		DurationMs: time.Since(start).Milliseconds(),
+		ExitCode:   0,
+	})
 
 	// Copy outputs to workspace.
 	return e.restoreOutputs(t.Label, result)
@@ -116,6 +152,12 @@ func (e *Executor) restoreOutputs(label string, result cache.ActionResult) error
 		}
 	}
 	return nil
+}
+
+func (e *Executor) record(a metrics.ActionRow) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.actions = append(e.actions, a)
 }
 
 // labelToDir converts //src/hello:hello → src/hello.

@@ -14,10 +14,12 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/xitingxie/build-system/internal/cache"
 	"github.com/xitingxie/build-system/internal/executor"
 	"github.com/xitingxie/build-system/internal/graph"
+	"github.com/xitingxie/build-system/internal/metrics"
 	"github.com/xitingxie/build-system/internal/parser"
 	"github.com/xitingxie/build-system/internal/scheduler"
 )
@@ -93,7 +95,21 @@ func cmdBuild(workDir, label string) error {
 	sched := scheduler.New(exec, 0) // 0 = use GOMAXPROCS
 
 	fmt.Printf("Building %s\n", label)
-	return sched.Run(buildGraph)
+	start := time.Now()
+	buildErr := sched.Run(buildGraph)
+
+	// Record the build event (best-effort; never fail the build over metrics).
+	if db, err := metrics.Open(metrics.DefaultDir()); err == nil {
+		_ = db.InsertBuild(metrics.BuildRow{
+			ID:         start.UnixNano(),
+			StartedAt:  start,
+			DurationMs: time.Since(start).Milliseconds(),
+			Target:     label,
+			Success:    buildErr == nil,
+		}, exec.RecordedActions())
+	}
+
+	return buildErr
 }
 
 // cmdClean removes the local cache.
