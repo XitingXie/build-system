@@ -4,7 +4,6 @@ package executor
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -129,11 +128,8 @@ func (e *Executor) runAction(t parser.Target, srcPaths []string) (string, error)
 	cmd = strings.ReplaceAll(cmd, "$SRCS", strings.Join(srcPaths, " "))
 	cmd = strings.ReplaceAll(cmd, "$OUT", outPath)
 
-	c := exec.Command("sh", "-c", cmd)
-	c.Dir = filepath.Join(e.workDir, labelToDir(t.Label))
-	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
-	if err := c.Run(); err != nil {
+	dir := filepath.Join(e.workDir, labelToDir(t.Label))
+	if err := sandboxRun(cmd, dir, srcPaths, outDir); err != nil {
 		return "", fmt.Errorf("action failed for %s: %w", t.Label, err)
 	}
 	return outDir, nil
